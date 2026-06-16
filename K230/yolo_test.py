@@ -46,7 +46,7 @@ from yolo_sender import (
 
 
 PRINT_INTERVAL_MS = 500
-ENABLE_DISPLAY = True
+ENABLE_DISPLAY = False
 DISPLAY_TO_IDE = True
 DEBUG_FRAME_STEPS = False
 DEBUG_SINGLE_FRAME = False
