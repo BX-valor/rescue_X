@@ -2,7 +2,7 @@
 
 ## YOLO 救援搬运主线
 
-`yolo_sender.py` 是当前任务的主线程序：K230 只做 YOLO 识别，并通过串口把
+`yolo_sender.py` 是当前任务的主线程序：K230 只做 YOLO11s 识别，并通过串口把
 检测结果发送给 ESP32；ESP32 负责目标选择、底盘运动和运输框舵机状态机。
 
 部署文件：
@@ -21,7 +21,8 @@ MODEL_PATH = "/sdcard/yolo11s_best_704.kmodel"
 ```
 
 默认队伍为红队，目标类别为 `red_ball`、`black_ball`、`yellow_ball`，安全区为
-`red_safe_zone`。类别顺序必须和 `model/data.yaml` 保持一致。
+`red_safe_zone`。当前模型为 `yolo11s_best_704.kmodel`，类别顺序必须和
+`model/data.yaml` 保持一致。
 
 串口协议为 `0xAA 0xBB + type + frame_id + payload_len + payload + crc16`，
 检测框使用 0-1000 归一化中心点和宽高。K230 只需要 TX 接到 ESP32 的视觉
