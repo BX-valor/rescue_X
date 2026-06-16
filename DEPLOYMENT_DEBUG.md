@@ -32,6 +32,7 @@ ESP32 端烧录：
   Python/ulab 手动 `transpose`，704 输入会非常慢甚至卡住。
 - `YOLO_OUTPUT_FORMAT`: 当前模型输出为 `(1, 14, 10164)`，即 YOLO11 的 `4 + 10类` 格式，保持 `"YOLO11_4_NC"`。
 - `SENSOR_PIXFORMAT`: 默认 `"RGB888"`；如果只有低分误检，可尝试改成 `"RGB565"` 排查输入格式问题。
+- `SHOW_IMAGE` / `DISPLAY_TO_IDE`: 默认已改为 `False`，上车时不再向 IDE 回传画面，减少带宽和卡顿。如需本地预览可临时改为 `True`。
 
 ### ESP32: `car_control/car_control.ino`
 
@@ -87,10 +88,18 @@ YOLO,red_safe_zone,78,505,650,450,260
 它们会主动加入该目录。模型文件名建议保持为 `yolo11s_best_704.kmodel`，不要在
 `.kmodel` 前留空格。
 
+`yolo_test.py` 顶部有 `ENABLE_DISPLAY` 开关：设为 `False` 可关闭所有显示相关初始化，
+只保留检测串口输出，适合只验证 YOLO 准确率时使用。
+
 实时预览默认开启，使用 CanMV 官方 Display 回传到 IDE：
 `Display.init(Display.VIRT, width=704, height=704, to_ide=True)`。
 运行 `yolo_test.py` 后，在 CanMV IDE 打开图像/帧缓冲预览窗口即可实时看带检测框的画面。
 若正式上车时帧率不够，或 IDE 预览导致卡顿，可把 `DISPLAY_TO_IDE` 改为 `False`。
+
+**注意**：当前 K230 固件的 `Image` 对象没有 `resize()` 方法，`resize_for_display()` 内部
+改用 `Image.scale(x_scale, y_scale)` 实现缩放。如果遇到 `ValueError: image exceed the panel resolution`，
+说明缩放失败并 fallback 回了原图；此时 `yolo_test.py` 会跳过显示避免崩溃，但应检查
+`DISPLAY_WIDTH/HEIGHT` 和 `FRAME_WIDTH/HEIGHT` 是否配置正确。
 
 `yolo_test.py` 默认不保存图片，避免 SD 卡写入造成卡顿。如需保存带检测框的调试图片，
 把 `SAVE_DEBUG_IMAGES` 改为 `True`：
@@ -115,6 +124,7 @@ YOLO,red_safe_zone,78,505,650,450,260
 ## 7. 常见问题
 
 - `yolo_test.py` 启动就报模型错误：确认 `MODEL_PATH`、文件名、SD 卡路径完全正确。
+- 报 `ValueError: image exceed the panel resolution`：当前 K230 固件使用 `Image.scale()` 而非 `resize()` 进行显示缩放；通常是因为 `resize_for_display()` 失败并 fallback 回 704×704 原图。检查 `FRAME_WIDTH/HEIGHT` 与 `DISPLAY_WIDTH/HEIGHT`，并确认 `yolo_sender.py` 已更新到使用 `scale()` 的版本。
 - 报 `no module named rescue_protocol` 或类似错误：确认文件名必须是英文 `rescue_protocol.py`，不是 `rescue_protocal.py`、`rescue_protocol.py.txt` 或 CanMV 另存出来的带后缀副本；先运行 `check_files.py` 看板上真实文件名。
 - 卡在 `TENSOR transpose`：使用新版 `yolo_sender.py`，默认 `MODEL_INPUT_LAYOUT = "AI2D_NCHW"`，
   让 AI2D 完成 `HWC -> NCHW`。运行时应看到 `AI2D init OK`、`AI2D run OK`，然后进入

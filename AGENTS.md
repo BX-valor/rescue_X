@@ -6,16 +6,18 @@ This repository contains control and vision code for the `rescue_X` car.
 
 - `car_control/`: ESP32/Arduino vehicle control firmware. The main sketch is `car_control.ino`.
 - `MaixCam/`: MaixCam Python code for YOLO-based ball and safe-area detection plus control logic. Helpers such as `uartCommand.py` and `control_servo.py` run on the device.
-- `K230/`: CanMV K230 traditional color-vision prototype. `color_vision.py` is the entry point; `color_config.py` holds LAB thresholds and tuning constants.
+- `K230/`: CanMV K230 vision code. The current main line is `yolo_sender.py` (YOLO11s detection + UART output to ESP32) and `yolo_test.py` (standalone preview/test). `color_vision.py` remains as a traditional LAB color-vision prototype with `color_config.py`. `rescue_protocol.py` is the shared UART frame encoder.
 - `model/`: Model artifacts (`.mud`, `.cvimodel`, `.kmodel`) and `data.yaml`. Keep generated model files here.
 
 There is currently no dedicated `tests/` directory.
 
 ## Build, Test, and Development Commands
 
-- `python -m py_compile K230/color_vision.py K230/color_config.py`: quick syntax check for K230 Python.
+- `python -m py_compile K230/yolo_sender.py K230/yolo_test.py K230/rescue_protocol.py K230/color_vision.py K230/color_config.py`: quick syntax check for K230 Python.
 - `python -m py_compile MaixCam/*.py`: quick syntax check for MaixCam scripts; hardware-specific imports may still require device validation.
 - Open `car_control/car_control.ino` in Arduino IDE or PlatformIO and build for ESP32 to validate firmware changes.
+- Run `K230/yolo_test.py` in CanMV IDE K230 to verify YOLO detection before connecting ESP32.
+- Run `K230/yolo_sender.py` for real-car deployment after ESP32 wiring is complete.
 - Run `K230/color_vision.py` in CanMV IDE K230 with `color_config.py` in the same directory.
 
 Deploy MaixCam helpers according to `README.md`: place `uartCommand.py` and `control_servo.py` under the runtime path expected by the device.
