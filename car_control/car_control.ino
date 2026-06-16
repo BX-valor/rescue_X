@@ -31,17 +31,47 @@
 #define SERVO_PIN   15   //舵机引脚
 
 #define VERTREFRESH 50    //计数器刷新频率
-#define RADIUS      2     //轮子到中心的半径
 #define MAXPWM      255  
+#define DIFF_TURN_GAIN 1
 
-#define START_BYTE 0xAABB  // 起始标识符
-#define DATA_LENGTH 18     // 数据帧长度
+#define VISION_UART_BAUD 115200
+#define VISION_UART_RX_PIN 37   // TODO: change to the actual ESP32 RX pin wired to K230 TX.
+#define VISION_UART_TX_PIN -1   // K230 only sends detections, so TX is unused by default.
 
-// 定义 4 个 PCNT 单元
+#define VISION_START_HIGH 0xAA
+#define VISION_START_LOW  0xBB
+#define VISION_PACKET_DETECTIONS 0x01
+#define VISION_TEAM_RED 0x01
+#define VISION_MAX_DETECTIONS 12
+#define VISION_DETECTION_SIZE 10
+#define VISION_MAX_PAYLOAD (2 + VISION_MAX_DETECTIONS * VISION_DETECTION_SIZE)
+#define VISION_TIMEOUT_MS 500
+
+#define FRAME_UP_ANGLE 10       // Calibrate on hardware.
+#define FRAME_DOWN_ANGLE 170    // Calibrate on hardware.
+
+#define AUTO_CONTROL_PERIOD_MS 50
+#define SEARCH_RZ_SPEED 70
+#define SEARCH_SWEEP_MS 2500
+#define APPROACH_Y_SPEED 75
+#define APPROACH_X_GAIN 0.18f
+#define APPROACH_RZ_GAIN 0.08f
+#define CENTER_DEADZONE 45
+#define CAPTURE_CY_THRESHOLD 820
+#define CAPTURE_H_THRESHOLD 220
+#define CAPTURE_HOLD_MS 700
+#define SAFE_APPROACH_Y_SPEED 65
+#define SAFE_APPROACH_X_GAIN 0.16f
+#define SAFE_APPROACH_RZ_GAIN 0.06f
+#define SAFE_CY_THRESHOLD 760
+#define SAFE_H_THRESHOLD 520
+#define RELEASE_HOLD_MS 700
+#define RELEASE_BACKUP_MS 900
+#define RELEASE_BACKUP_SPEED -45
+
+// 两轮差速底盘：A/B为左右驱动轮，前方为万向轮。
 pcnt_unit_handle_t pcnt_unit_1 = NULL;
 pcnt_unit_handle_t pcnt_unit_2 = NULL;
-pcnt_unit_handle_t pcnt_unit_3 = NULL;
-pcnt_unit_handle_t pcnt_unit_4 = NULL;
 
 Servo servo;
 int minUs = 500;
@@ -50,6 +80,7 @@ int maxUs = 2500;
 bfs::SbusRx sbus_rx(&Serial2, 16, 17, true, false);   //sbus接收机
 bfs::SbusData sbus_data;
 int sbusMiddle[3] = {1000,1038,1000};
+HardwareSerial VisionSerial(1);
 
 /* 定义控制模式 */
 enum ControlMode { AUTO, MANUAL };
@@ -57,10 +88,8 @@ ControlMode controlMode = AUTO;  // 默认模式
 
 /*-------------------霍尔编码器计数器--------------------*/
 //MG370每圈13个脉冲，1:34减速比，轮子转动一圈共有442个脉冲,一秒的时间里，每个duty（0-255）对应约16.56个脉冲，约2.24289rpm
-volatile int Velocity1 = 0;   //换算为0-255的duty
-volatile int Velocity2 = 0;
-volatile int Velocity3 = 0;
-volatile int Velocity4 = 0;
+volatile int Velocity1 = 0;   //左轮，换算为0-255的duty
+volatile int Velocity2 = 0;   //右轮，换算为0-255的duty
 
 // 观察点回调函数
 static bool pcnt_on_reach(pcnt_unit_handle_t unit, const pcnt_watch_event_data_t *event_data, void *user_ctx) {
@@ -122,13 +151,11 @@ int readEncoderPCNT(pcnt_unit_handle_t unit) {
 
 // 定时器回调函数，用于定期读取编码器值并计算速度
 void calculateSpeed(TimerHandle_t xTimer) {
-    static int lastCount1 = 0, lastCount2 = 0, lastCount3 = 0, lastCount4 = 0;
+    static int lastCount1 = 0, lastCount2 = 0;
 
     // 读取当前计数值
     int currentCount1 = readEncoderPCNT(pcnt_unit_1);
     int currentCount2 = readEncoderPCNT(pcnt_unit_2);
-    int currentCount3 = readEncoderPCNT(pcnt_unit_3);
-    int currentCount4 = readEncoderPCNT(pcnt_unit_4);
 
     // 计算脉冲变化量，并处理计数器回绕
     int delta1 = currentCount1 - lastCount1;
@@ -145,43 +172,21 @@ void calculateSpeed(TimerHandle_t xTimer) {
         delta2 += 32768;
     }
 
-    int delta3 = currentCount3 - lastCount3;
-    if (delta3 > 3276) {
-        delta3 -= 32768;
-    } else if (delta3 < -3276) {
-        delta3 += 32768;
-    }
-
-    int delta4 = currentCount4 - lastCount4;
-    if (delta4 > 3276) {
-        delta4 -= 32768;
-    } else if (delta4 < -3276) {
-        delta4 += 32768;
-    }
-
     // 更新上一次的计数值
     lastCount1 = currentCount1;
     lastCount2 = currentCount2;
-    lastCount3 = currentCount3;
-    lastCount4 = currentCount4;
 
     // 计算速度（RPM）
     int speed1 = (delta1 * 60) / (374 * 0.05);    // 11*34=374脉冲一圈
     int speed2 = (delta2 * 60) / (374 * 0.05);
-    int speed3 = (delta3 * 60) / (374 * 0.05);
-    int speed4 = (delta4 * 60) / (374 * 0.05);
 
     // 计算速度（duty）
     Velocity1 = (delta1 * 2000) / (34 * VERTREFRESH);
     Velocity2 = (delta2 * 2000) / (34 * VERTREFRESH);
-    Velocity3 = (delta3 * 2000) / (34 * VERTREFRESH);
-    Velocity4 = (delta4 * 2000) / (34 * VERTREFRESH);
   
     // 打印速度和计数值
     // Serial.printf("Encoder 1: Count=%d, Speed=%d, Velocity1=%d\n", currentCount1, speed1, Velocity1);
     // Serial.printf("Encoder 2: Count=%d, Speed=%d, Velocity2=%d\n", currentCount2, speed2, Velocity2);
-    // Serial.printf("Encoder 3: Count=%d, Speed=%d, Velocity3=%d\n", currentCount3, speed3, Velocity3);
-    // Serial.printf("Encoder 4: Count=%d, Speed=%d, Velocity4=%d\n", currentCount4, speed4, Velocity4);
     // Serial.println("-----------------------------");
     // esp_task_wdt_reset();
 }
@@ -260,28 +265,24 @@ void initSbusMiddle(int16_t sbus_ch0, int16_t sbus_ch1, int16_t sbus_ch3){      
 }
 
 /*------------------车轮初始化------------------------------*/
-MotorController motor1(MOTOR_A_PWM, MOTOR_A_IN1, MOTOR_A_IN2);
-MotorController motor2(MOTOR_B_PWM, MOTOR_B_IN1, MOTOR_B_IN2);
-MotorController motor3(MOTOR_C_PWM, MOTOR_C_IN1, MOTOR_C_IN2);
-MotorController motor4(MOTOR_D_PWM, MOTOR_D_IN1, MOTOR_D_IN2);
+MotorController leftMotor(MOTOR_A_PWM, MOTOR_A_IN1, MOTOR_A_IN2);
+MotorController rightMotor(MOTOR_B_PWM, MOTOR_B_IN1, MOTOR_B_IN2);
 /*------------------车轮初始化------------------------------*/
 
-// 计算4个电机的速度  // x方向目标速度，y方向目标速度，z轴目标角速度，电机1速度，电机2速度。。。
-void calc_velocity(int target_x, int target_y, int target_zr, int* motor1, int* motor2, int* motor3, int* motor4) {
-  *motor1 = target_y - target_x + target_zr * RADIUS/5;
-  *motor2 = -target_y - target_x + target_zr * RADIUS/5;
-  *motor3 = -target_y + target_x + target_zr * RADIUS/5;
-  *motor4 = target_y + target_x + target_zr * RADIUS/5;
+// 两轮差速底盘无法横移，target_x由上层转向控制吸收。
+void calc_velocity(int target_x, int target_y, int target_zr, int* left, int* right) {
+  (void)target_x;
+  int turn = target_zr * DIFF_TURN_GAIN;
+  *left = constrain(target_y + turn, -MAXPWM, MAXPWM);
+  *right = constrain(target_y - turn, -MAXPWM, MAXPWM);
 }
 
-// 设置4个电机的速度
+// 设置两侧驱动轮速度：y为前后，rz为原地/弧线转向。
 void handleMotor(int x, int y, int rz) {
-    int motor1_vel = 0, motor2_vel = 0, motor3_vel = 0, motor4_vel = 0;
-    calc_velocity(x, y, rz, &motor1_vel, &motor2_vel, &motor3_vel, &motor4_vel);
-    motor1.setTargetSpeed(motor1_vel);
-    motor2.setTargetSpeed(motor2_vel);
-    motor3.setTargetSpeed(motor3_vel);
-    motor4.setTargetSpeed(motor4_vel);
+    int left_vel = 0, right_vel = 0;
+    calc_velocity(x, y, rz, &left_vel, &right_vel);
+    leftMotor.setTargetSpeed(left_vel);
+    rightMotor.setTargetSpeed(right_vel);
 }
 
 int sbusMap(int input, int middle) {
@@ -337,85 +338,429 @@ void manualControl_TimerCallback(TimerHandle_t xTimer) {
         if (controlMode == MANUAL)  handleMotor(0, 0, 0);
     }
 }
-/*------------------串口控制相关变量------------------*/
-struct UartCommand {
-    int x;
-    int y;
-    int rz;
-    int servo_angle;
-} uartCmd = {0, 0, 0, 0};
-/*------------------串口控制相关变量------------------*/
+/*------------------K230视觉检测协议与自动状态机------------------*/
+enum VisionClassId {
+    CLASS_CROSS_MARKER = 0,
+    CLASS_RED_BALL = 1,
+    CLASS_YELLOW_BALL = 2,
+    CLASS_BLUE_BALL = 3,
+    CLASS_BLACK_BALL = 4,
+    CLASS_RED_SAFE_ZONE = 5,
+    CLASS_BLUE_SAFE_ZONE = 6,
+    CLASS_PURPLE_BOUNDARY = 7,
+    CLASS_BLUE_START_ZONE = 8,
+    CLASS_RED_START_ZONE = 9
+};
 
-// 自动控制回调函数
+struct VisionDetection {
+    uint8_t class_id;
+    uint8_t score;
+    uint16_t cx;
+    uint16_t cy;
+    uint16_t w;
+    uint16_t h;
+};
+
+struct VisionFrame {
+    uint8_t frame_id;
+    uint8_t count;
+    bool valid;
+    uint32_t received_ms;
+    VisionDetection detections[VISION_MAX_DETECTIONS];
+} latestVision = {0, 0, false, 0, {}};
+
+enum AutoState {
+    SEARCH_BALL,
+    APPROACH_BALL,
+    CAPTURE,
+    FIND_SAFE_ZONE,
+    APPROACH_SAFE_ZONE,
+    RELEASE
+};
+
+AutoState autoState = SEARCH_BALL;
+uint32_t autoStateStartedMs = 0;
+int searchDirection = 1;
+bool carryingTarget = false;
+
+enum VisionParseState {
+    WAIT_START_HIGH,
+    WAIT_START_LOW,
+    READ_TYPE,
+    READ_FRAME_ID,
+    READ_PAYLOAD_LEN,
+    READ_PAYLOAD,
+    READ_CRC_HIGH,
+    READ_CRC_LOW
+};
+
+VisionParseState visionParseState = WAIT_START_HIGH;
+uint8_t parserType = 0;
+uint8_t parserFrameId = 0;
+uint8_t parserPayloadLen = 0;
+uint8_t parserPayload[VISION_MAX_PAYLOAD];
+uint8_t parserPayloadIndex = 0;
+uint8_t parserCrcHigh = 0;
+uint16_t parserCrc = 0xFFFF;
+
+uint16_t crc16CcittUpdate(uint16_t crc, uint8_t data) {
+    crc ^= (uint16_t)data << 8;
+    for (uint8_t i = 0; i < 8; i++) {
+        if (crc & 0x8000) {
+            crc = (crc << 1) ^ 0x1021;
+        } else {
+            crc <<= 1;
+        }
+    }
+    return crc;
+}
+
+void resetVisionParser() {
+    visionParseState = WAIT_START_HIGH;
+    parserPayloadIndex = 0;
+    parserPayloadLen = 0;
+    parserCrc = 0xFFFF;
+}
+
+uint16_t readU16Le(const uint8_t *data) {
+    return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+}
+
+bool parseDetectionPayload() {
+    if (parserType != VISION_PACKET_DETECTIONS || parserPayloadLen < 2) {
+        return false;
+    }
+
+    uint8_t team_color = parserPayload[0];
+    uint8_t reported_count = parserPayload[1];
+    if (team_color != VISION_TEAM_RED) {
+        return false;
+    }
+
+    uint8_t available_count = (parserPayloadLen - 2) / VISION_DETECTION_SIZE;
+    uint8_t count = min(reported_count, available_count);
+    count = min(count, (uint8_t)VISION_MAX_DETECTIONS);
+
+    latestVision.frame_id = parserFrameId;
+    latestVision.count = count;
+    latestVision.valid = true;
+    latestVision.received_ms = millis();
+
+    for (uint8_t i = 0; i < count; i++) {
+        uint8_t *item = &parserPayload[2 + i * VISION_DETECTION_SIZE];
+        latestVision.detections[i].class_id = item[0];
+        latestVision.detections[i].score = item[1];
+        latestVision.detections[i].cx = readU16Le(&item[2]);
+        latestVision.detections[i].cy = readU16Le(&item[4]);
+        latestVision.detections[i].w = readU16Le(&item[6]);
+        latestVision.detections[i].h = readU16Le(&item[8]);
+    }
+
+    return true;
+}
+
+void processVisionByte(uint8_t incoming) {
+    switch (visionParseState) {
+        case WAIT_START_HIGH:
+            if (incoming == VISION_START_HIGH) {
+                visionParseState = WAIT_START_LOW;
+            }
+            break;
+
+        case WAIT_START_LOW:
+            if (incoming == VISION_START_LOW) {
+                parserCrc = 0xFFFF;
+                parserPayloadIndex = 0;
+                visionParseState = READ_TYPE;
+            } else {
+                visionParseState = WAIT_START_HIGH;
+            }
+            break;
+
+        case READ_TYPE:
+            parserType = incoming;
+            parserCrc = crc16CcittUpdate(parserCrc, incoming);
+            visionParseState = READ_FRAME_ID;
+            break;
+
+        case READ_FRAME_ID:
+            parserFrameId = incoming;
+            parserCrc = crc16CcittUpdate(parserCrc, incoming);
+            visionParseState = READ_PAYLOAD_LEN;
+            break;
+
+        case READ_PAYLOAD_LEN:
+            parserPayloadLen = incoming;
+            parserCrc = crc16CcittUpdate(parserCrc, incoming);
+            if (parserPayloadLen > VISION_MAX_PAYLOAD) {
+                resetVisionParser();
+            } else if (parserPayloadLen == 0) {
+                visionParseState = READ_CRC_HIGH;
+            } else {
+                parserPayloadIndex = 0;
+                visionParseState = READ_PAYLOAD;
+            }
+            break;
+
+        case READ_PAYLOAD:
+            parserPayload[parserPayloadIndex++] = incoming;
+            parserCrc = crc16CcittUpdate(parserCrc, incoming);
+            if (parserPayloadIndex >= parserPayloadLen) {
+                visionParseState = READ_CRC_HIGH;
+            }
+            break;
+
+        case READ_CRC_HIGH:
+            parserCrcHigh = incoming;
+            visionParseState = READ_CRC_LOW;
+            break;
+
+        case READ_CRC_LOW: {
+            uint16_t received_crc = ((uint16_t)parserCrcHigh << 8) | incoming;
+            if (received_crc == parserCrc) {
+                parseDetectionPayload();
+            } else {
+                Serial.println("Vision CRC error");
+            }
+            resetVisionParser();
+            break;
+        }
+    }
+}
+
+const char *autoStateName(AutoState state) {
+    switch (state) {
+        case SEARCH_BALL: return "SEARCH_BALL";
+        case APPROACH_BALL: return "APPROACH_BALL";
+        case CAPTURE: return "CAPTURE";
+        case FIND_SAFE_ZONE: return "FIND_SAFE_ZONE";
+        case APPROACH_SAFE_ZONE: return "APPROACH_SAFE_ZONE";
+        case RELEASE: return "RELEASE";
+    }
+    return "UNKNOWN";
+}
+
+void enterAutoState(AutoState nextState) {
+    if (autoState != nextState) {
+        Serial.printf("AUTO %s -> %s\n", autoStateName(autoState), autoStateName(nextState));
+    }
+    autoState = nextState;
+    autoStateStartedMs = millis();
+}
+
+int clampSpeed(int value, int limit) {
+    return constrain(value, -limit, limit);
+}
+
+int centerControl(uint16_t cx, float gain, int limit) {
+    int error = (int)cx - 500;
+    if (abs(error) < CENTER_DEADZONE) {
+        return 0;
+    }
+    return clampSpeed((int)(error * gain), limit);
+}
+
+int targetPoints(uint8_t class_id) {
+    if (class_id == CLASS_YELLOW_BALL) return 15;
+    if (class_id == CLASS_BLACK_BALL) return 10;
+    if (class_id == CLASS_RED_BALL) return 5;
+    return 0;
+}
+
+bool isTargetBall(uint8_t class_id) {
+    return class_id == CLASS_RED_BALL || class_id == CLASS_BLACK_BALL || class_id == CLASS_YELLOW_BALL;
+}
+
+bool findBestTarget(VisionDetection *bestTarget) {
+    bool found = false;
+    long bestScore = -999999;
+
+    for (uint8_t i = 0; i < latestVision.count; i++) {
+        VisionDetection det = latestVision.detections[i];
+        if (!isTargetBall(det.class_id) || det.score < 35) {
+            continue;
+        }
+
+        long priority = (long)targetPoints(det.class_id) * 1000L;
+        priority += det.cy;
+        priority += det.h / 2;
+        priority -= abs((int)det.cx - 500);
+
+        if (!found || priority > bestScore) {
+            *bestTarget = det;
+            bestScore = priority;
+            found = true;
+        }
+    }
+
+    return found;
+}
+
+bool findRedSafeZone(VisionDetection *safeZone) {
+    bool found = false;
+    long bestArea = 0;
+
+    for (uint8_t i = 0; i < latestVision.count; i++) {
+        VisionDetection det = latestVision.detections[i];
+        if (det.class_id != CLASS_RED_SAFE_ZONE || det.score < 35) {
+            continue;
+        }
+
+        long area = (long)det.w * det.h;
+        if (!found || area > bestArea) {
+            *safeZone = det;
+            bestArea = area;
+            found = true;
+        }
+    }
+
+    return found;
+}
+
+bool visionFrameFresh(uint32_t now) {
+    return latestVision.valid && (now - latestVision.received_ms <= VISION_TIMEOUT_MS);
+}
+
+void stopAutoForVisionLoss() {
+    bool hadFreshFrame = latestVision.valid;
+    handleMotor(0, 0, 0);
+    latestVision.valid = false;
+    if (autoState != SEARCH_BALL) {
+        enterAutoState(SEARCH_BALL);
+    }
+    if (hadFreshFrame) {
+        Serial.println("Vision timeout: motors stopped");
+    }
+}
+
+void updateAutoControl(uint32_t now) {
+    if (!visionFrameFresh(now)) {
+        stopAutoForVisionLoss();
+        return;
+    }
+
+    VisionDetection target;
+    VisionDetection safeZone;
+
+    switch (autoState) {
+        case SEARCH_BALL:
+            carryingTarget = false;
+            servo.write(FRAME_UP_ANGLE);
+            if (findBestTarget(&target)) {
+                enterAutoState(APPROACH_BALL);
+                handleMotor(0, 0, 0);
+            } else {
+                if (now - autoStateStartedMs > SEARCH_SWEEP_MS) {
+                    searchDirection = -searchDirection;
+                    autoStateStartedMs = now;
+                }
+                handleMotor(0, 0, SEARCH_RZ_SPEED * searchDirection);
+            }
+            break;
+
+        case APPROACH_BALL:
+            servo.write(FRAME_UP_ANGLE);
+            if (!findBestTarget(&target)) {
+                enterAutoState(SEARCH_BALL);
+                handleMotor(0, 0, 0);
+                break;
+            }
+            if (target.cy >= CAPTURE_CY_THRESHOLD || target.h >= CAPTURE_H_THRESHOLD) {
+                enterAutoState(CAPTURE);
+                handleMotor(0, 0, 0);
+                break;
+            }
+            handleMotor(
+                centerControl(target.cx, APPROACH_X_GAIN, 90),
+                APPROACH_Y_SPEED,
+                centerControl(target.cx, APPROACH_RZ_GAIN, 60)
+            );
+            break;
+
+        case CAPTURE:
+            handleMotor(0, 0, 0);
+            servo.write(FRAME_DOWN_ANGLE);
+            if (now - autoStateStartedMs >= CAPTURE_HOLD_MS) {
+                carryingTarget = true;
+                enterAutoState(FIND_SAFE_ZONE);
+            }
+            break;
+
+        case FIND_SAFE_ZONE:
+            servo.write(FRAME_DOWN_ANGLE);
+            if (findRedSafeZone(&safeZone)) {
+                enterAutoState(APPROACH_SAFE_ZONE);
+                handleMotor(0, 0, 0);
+            } else {
+                if (now - autoStateStartedMs > SEARCH_SWEEP_MS) {
+                    searchDirection = -searchDirection;
+                    autoStateStartedMs = now;
+                }
+                handleMotor(0, 0, SEARCH_RZ_SPEED * searchDirection);
+            }
+            break;
+
+        case APPROACH_SAFE_ZONE:
+            servo.write(FRAME_DOWN_ANGLE);
+            if (!findRedSafeZone(&safeZone)) {
+                enterAutoState(FIND_SAFE_ZONE);
+                handleMotor(0, 0, 0);
+                break;
+            }
+            if (safeZone.cy >= SAFE_CY_THRESHOLD || safeZone.h >= SAFE_H_THRESHOLD) {
+                enterAutoState(RELEASE);
+                handleMotor(0, 0, 0);
+                break;
+            }
+            handleMotor(
+                centerControl(safeZone.cx, SAFE_APPROACH_X_GAIN, 80),
+                SAFE_APPROACH_Y_SPEED,
+                centerControl(safeZone.cx, SAFE_APPROACH_RZ_GAIN, 50)
+            );
+            break;
+
+        case RELEASE:
+            servo.write(FRAME_UP_ANGLE);
+            if (now - autoStateStartedMs < RELEASE_HOLD_MS) {
+                handleMotor(0, 0, 0);
+            } else if (now - autoStateStartedMs < RELEASE_HOLD_MS + RELEASE_BACKUP_MS) {
+                handleMotor(0, RELEASE_BACKUP_SPEED, 0);
+            } else {
+                carryingTarget = false;
+                enterAutoState(SEARCH_BALL);
+                handleMotor(0, 0, 0);
+            }
+            break;
+    }
+}
+
+// 自动控制任务：读取K230检测帧并在ESP32侧执行搬运状态机。
 void autoControlTask(void *pvParameters) {
-    static bool awaiting_start = true;
-    static uint8_t data_buffer[sizeof(UartCommand)];
-    static size_t received_bytes = 0;
-    static uint16_t start_byte_buffer = 0;
-
-    TickType_t last_receive_time = xTaskGetTickCount();  // 记录上次接收到数据的时间
-    const TickType_t timeout_ticks = pdMS_TO_TICKS(5000);  // 超时 5 秒（5000ms）
+    uint32_t lastControlMs = 0;
 
     while (true) {
         if (controlMode == AUTO) {
-            if (Serial.available()) {
-                uint8_t incoming_byte = Serial.read();
-
-                if (awaiting_start) {
-                    start_byte_buffer = (start_byte_buffer << 8) | incoming_byte;
-
-                    if (start_byte_buffer == START_BYTE) {
-                        awaiting_start = false;
-                        received_bytes = 0;  // 重置接收计数
-                        Serial.println("Start byte detected.");
-                    }
-                } else {
-                    // 接收数据到缓冲区
-                    data_buffer[received_bytes++] = incoming_byte;
-
-                    // 如果接收完完整的 UartCommand 数据
-                    if (received_bytes == sizeof(UartCommand)) {
-                        memcpy(&uartCmd, data_buffer, sizeof(UartCommand));
-
-                        // 打印解析的数据
-                        Serial.printf("x=%d, y=%d, rz=%d, servo_angle=%d\n",
-                                      uartCmd.x, uartCmd.y, uartCmd.rz, uartCmd.servo_angle);
-
-                        // 调用控制函数
-                        handleMotor(uartCmd.x, uartCmd.y, uartCmd.rz);
-                        servo.write(uartCmd.servo_angle);
-
-                        // 更新接收时间
-                        last_receive_time = xTaskGetTickCount();
-
-                        // 重置状态
-                        awaiting_start = true;
-                    }
-                }
-            } else {
-                // 检查超时
-                if ((xTaskGetTickCount() - last_receive_time) > timeout_ticks) {
-                    Serial.println("UART timeout: Stopping motors.");
-                    handleMotor(0, 0, 0);  // 停止电机
-                    received_bytes = 0;    // 清空接受计数
-                    received_bytes = 0;    // 重置起始标志
-                    start_byte_buffer = 0; // 清空起始字节缓冲
-                    last_receive_time = xTaskGetTickCount();  // 重置时间，避免重复执行
-                }
-
-                vTaskDelay(pdMS_TO_TICKS(100));  // 延迟，避免占用过多 CPU 时间
+            while (VisionSerial.available()) {
+                processVisionByte((uint8_t)VisionSerial.read());
             }
+
+            uint32_t now = millis();
+            if (now - lastControlMs >= AUTO_CONTROL_PERIOD_MS) {
+                updateAutoControl(now);
+                lastControlMs = now;
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(10));
         } else {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
 }
+/*------------------K230视觉检测协议与自动状态机------------------*/
 
 void motorUpdateTimerCallback(TimerHandle_t xTimer) {
-    motor1.update();
-    motor2.update();
-    motor3.update();
-    motor4.update();
+    leftMotor.update();
+    rightMotor.update();
 }
 void setup() {
     // 配置看门狗
@@ -428,10 +773,13 @@ void setup() {
     servo.setPeriodHertz(50);
     servo.attach(SERVO_PIN, minUs, maxUs);
     delay(50);
-    servo.write(10);    //舵机初始位置
+    servo.write(FRAME_UP_ANGLE);    //舵机初始位置，实车需要校准
 /*------------------夹取舵机初始化------------------*/
     
     Serial.begin(115200);
+    VisionSerial.begin(VISION_UART_BAUD, SERIAL_8N1, VISION_UART_RX_PIN, VISION_UART_TX_PIN);
+    Serial.printf("Vision UART started: baud=%d rx=%d tx=%d\n",
+                  VISION_UART_BAUD, VISION_UART_RX_PIN, VISION_UART_TX_PIN);
 
 /*-------------------SBUS接收机--------------------*/ 
     Serial2.begin(100000, SERIAL_8N2, 16, 17);
@@ -440,11 +788,9 @@ void setup() {
 /*-------------------SBUS接收机--------------------*/ 
 
 /*-------------------霍尔编码器定义--------------------*/
-    // 初始化 4 个编码器的 PCNT 模块
-    setupEncoderPCNT(&pcnt_unit_1, MOTOR_A_EA, MOTOR_A_EB);  // 编码器 1
-    setupEncoderPCNT(&pcnt_unit_2, MOTOR_B_EA, MOTOR_B_EB);  // 编码器 2
-    setupEncoderPCNT(&pcnt_unit_3, MOTOR_C_EA, MOTOR_C_EB);  // 编码器 3
-    setupEncoderPCNT(&pcnt_unit_4, MOTOR_D_EA, MOTOR_D_EB);  // 编码器 4
+    // 初始化左右驱动轮编码器
+    setupEncoderPCNT(&pcnt_unit_1, MOTOR_A_EA, MOTOR_A_EB);  // 左轮编码器
+    setupEncoderPCNT(&pcnt_unit_2, MOTOR_B_EA, MOTOR_B_EB);  // 右轮编码器
 
     // 创建定时器，每 50ms 调用一次 calculateSpeed 函数
     TimerHandle_t speedTimer = xTimerCreate(
@@ -462,10 +808,8 @@ void setup() {
 /*-------------------霍尔编码器定义--------------------*/
 
 /*------------------设置motor速度指针-------------------*/ 
-    motor1.setCurrentSpeed(&Velocity1);
-    motor2.setCurrentSpeed(&Velocity2);
-    motor3.setCurrentSpeed(&Velocity3);
-    motor4.setCurrentSpeed(&Velocity4);
+    leftMotor.setCurrentSpeed(&Velocity1);
+    rightMotor.setCurrentSpeed(&Velocity2);
 /*------------------设置motor速度指针-------------------*/ 
 
 /*------------------创建手动控制定时器（80ms）------------------*/
