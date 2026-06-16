@@ -1,0 +1,15 @@
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: cross_marker
+  1: red_ball
+  2: yellow_ball
+  3: blue_ball
+  4: black_ball
+  5: red_safe_zone
+  6: blue_safe_zone
+  7: purple_boundary
+  8: blue_start_zone
+  9: red_start_zone
