@@ -35,6 +35,7 @@ from yolo_sender import (
     MODEL_INPUT_LAYOUT,
     SENSOR_PIXFORMAT,
     K230YoloDetector,
+    _image_size,
     draw_detections,
     resize_for_display,
     resolve_model_path,
@@ -166,7 +167,12 @@ def main():
                 draw_detections(display_img, detections, DISPLAY_WIDTH, DISPLAY_HEIGHT)
                 if DEBUG_FRAME_STEPS:
                     print("FRAME show")
-                Display.show_image(display_img)
+                disp_w, disp_h = _image_size(display_img)
+                if disp_w is None or disp_w > DISPLAY_WIDTH or disp_h > DISPLAY_HEIGHT:
+                    print("DISPLAY skip, resize failed, size=%dx%d" %
+                          (disp_w or 0, disp_h or 0))
+                else:
+                    Display.show_image(display_img)
                 if DEBUG_FRAME_STEPS:
                     print("FRAME show OK")
 

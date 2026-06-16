@@ -616,27 +616,29 @@ def resize_for_display(img):
         return img
 
     original_size = _image_size(img)
+    img_w, img_h = original_size
+    if img_w is None or img_h is None:
+        print("DISPLAY resize fallback, cannot read size")
+        return img
+
+    scale_x = DISPLAY_WIDTH / img_w
+    scale_y = DISPLAY_HEIGHT / img_h
     display_img = None
 
     try:
-        if hasattr(img, "resize"):
+        if hasattr(img, "scale"):
             try:
-                display_img = img.resize(width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT, copy=True)
+                display_img = img.scale(scale_x, scale_y)
             except Exception as error:
-                print("DISPLAY resize kw failed: %s" % error)
+                print("DISPLAY scale failed: %s" % error)
                 display_img = None
-            if display_img is None:
-                try:
-                    display_img = img.resize(DISPLAY_WIDTH, DISPLAY_HEIGHT)
-                except Exception as error:
-                    print("DISPLAY resize pos failed: %s" % error)
-                    display_img = None
-        if display_img is None and hasattr(img, "copy") and hasattr(img, "resize"):
+
+        if display_img is None and hasattr(img, "copy") and hasattr(img, "scale"):
             try:
                 display_img = img.copy()
-                display_img.resize(DISPLAY_WIDTH, DISPLAY_HEIGHT)
+                display_img = display_img.scale(scale_x, scale_y)
             except Exception as error:
-                print("DISPLAY copy+resize failed: %s" % error)
+                print("DISPLAY copy+scale failed: %s" % error)
                 display_img = None
     except Exception as error:
         print("DISPLAY resize failed: %s" % error)
